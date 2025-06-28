@@ -1,0 +1,23 @@
+{
+ "content": null,
+ "creation": "2025-06-28 16:18:23.568393",
+ "docstatus": 0,
+ "doctype": "Page",
+ "idx": 0,
+ "modified": "2025-06-28 16:18:23.568393",
+ "modified_by": "Administrator",
+ "module": "erpnext_assistant",
+ "name": "erpnext-assistant",
+ "owner": "Administrator",
+ "page_name": "erpnext-assistant",
+ "roles": [
+  {
+   "role": "All"
+  }
+ ],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "system_page": 0,
+ "title": "ERPnext Assistant"
+}

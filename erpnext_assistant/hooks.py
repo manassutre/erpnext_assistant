@@ -137,13 +137,18 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+	# "*": {
+	# 	"on_update": "method",
+	# 	"on_cancel": "method",
+	# 	"on_trash": "method"
+	# }
+    "Google API Key": {
+        "validate": [
+            "erpnext_assistant.erpnext_assistant.doctype.google_api_key.google_api_key.before_save"
+        ]
+    }
+}
 
 # Scheduled Tasks
 # ---------------
