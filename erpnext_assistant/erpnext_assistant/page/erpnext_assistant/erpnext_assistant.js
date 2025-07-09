@@ -7,7 +7,7 @@
 // }
 
 
-frappe.pages['erpnext-assistant'].on_page_load = function (wrapper) {
+    frappe.pages['erpnext-assistant'].on_page_load = function (wrapper) {
     new ChatBotPage(wrapper);
 };
 
@@ -135,10 +135,31 @@ ChatBotPage = Class.extend({
         $('#chat-input').val('');
 
         frappe.call({
-            method: 'ai_agent.ai_agent.page.ai_agent_1.ai_agent_1.get_response',
+            method: 'erpnext_assistant.erpnext_assistant.page.erpnext_assistant.erpnext_assistant.get_response',
             args: { message: user_input },
             callback: function (response) {
-                const bot_response = response.message || "Sorry, I couldn't process that.";
+                const result = response.message;
+
+                let displayText = '';
+                let bot_response = '';
+
+                if (result && typeof result === 'object') {
+                    if (Array.isArray(result.data)) {
+                        displayText = result.data.map(obj =>
+                            Object.entries(obj).map(([k, v]) => `${k}: ${v}`).join(', ')
+                        ).join('\n\n');
+                        bot_response = JSON.stringify(result.data);
+                    } else if (result.code) {
+                        displayText = result.code;
+                        bot_response = JSON.stringify(result.code);
+                    } else {
+                        displayText = JSON.stringify(result);
+                        bot_response = JSON.stringify(result);
+                    }
+                } else {
+                    displayText = String(result);
+                    bot_response = JSON.stringify(result);
+                }
 
                 $('#chat-output').append(`
                     <div style="align-self: flex-start; text-align: left; display: flex; gap: 10px;">
@@ -151,14 +172,14 @@ ChatBotPage = Class.extend({
                             white-space: pre-wrap;
                             word-wrap: break-word;
                             font-size: 15px;
-                        ">${frappe.utils.escape_html(bot_response)}</div>
+                        ">${frappe.utils.escape_html(displayText)}</div>
                         <button style="
                             background: none;
                             border: none;
                             cursor: pointer;
                             color: #4CAF50;
                             font-size: 18px;
-                        " title="Download" data-user-input="${user_input}" data-bot-response="${bot_response}">
+                        " title="Download" data-user-input="${user_input}" data-bot-response='${bot_response}'>
                             ⬇️
                         </button>
                     </div>
@@ -168,11 +189,15 @@ ChatBotPage = Class.extend({
                     const user_input = $(this).data('user-input');
                     const bot_response = $(this).data('bot-response');
                     frappe.call({
-                        method: 'ai_agent.ai_agent.page.ai_agent_1.ai_agent_1.download_response',
+                        method: 'erpnext_assistant.erpnext_assistant.page.erpnext_assistant.erpnext_assistant.download_response',
                         args: { user_input, bot_response },
-                        callback: function(r) {
-                            frappe.show_alert({ message: __('Downloading Response'), indicator: 'green' }, 3);
-                            window.location.href = r.message.file_url;
+                        callback: function (r) {
+                            if (r.message && r.message.file_url) {
+                                frappe.show_alert({ message: __('Downloading Response'), indicator: 'green' }, 3);
+                                window.location.href = r.message.file_url;
+                            } else {
+                                frappe.msgprint(__('Download failed. No file URL returned.'));
+                            }
                         }
                     });
                 });
@@ -183,6 +208,10 @@ ChatBotPage = Class.extend({
         });
     }
 });
+
+
+
+
 
 
 

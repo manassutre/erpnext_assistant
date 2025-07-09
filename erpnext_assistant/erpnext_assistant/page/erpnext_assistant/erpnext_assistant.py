@@ -1,207 +1,199 @@
 # chatbot.py
-import frappe
+"""AI‑powered assistant for ERPNext v15 sites
+------------------------------------------------
+This module replaces the previous proof‑of‑concept with a more robust engine
+that can:
+  • Generate SQL queries *or* Python snippets via Gemini 1.5
+  • Execute queries safely and return tidy JSON
+  • Fall back gracefully when a table is missing (no server‑side traceback)
+  • Deliver tabular results as an Excel download on demand
 
-@frappe.whitelist()
-def get_response(message):
-    # Simulate bot response logic
-    # Replace this logic with your actual response generation
-    return f"""Create a SQL query for below prompt to run in the Frappe ERPnext. 
-    '{message}'"""
+Public endpoints:
+  • get_solution(message)     → structured JSON response
+  • get_response(message)     → alias for backward compatibility
+  • download_solution(message)→ same as get_solution plus .xlsx link
+  • download_response(user_input, bot_response) → compatible with JS handler
+"""
 
-# Copyright (c) 2024, Abhijeet Sutar and contributors
-# For license information, please see license.txt
+from __future__ import annotations
 
-# import frappe
-from frappe.model.document import Document
-
-
-class UploadCustomerPO(Document):
-    pass
-
-import frappe
+import json
 import os
+from typing import Any, Dict, List, Union
+
+import frappe
 import google.generativeai as genai
 from dotenv import load_dotenv
-import json
-import csv
-import io
-import re 
-from frappe.utils import get_bench_path
-from frappe import throw
-from openpyxl import Workbook
-from frappe.utils.file_manager import save_file
 from frappe.utils import get_url
-from frappe.utils.file_manager import save_file  
+from frappe.utils.file_manager import save_file
+from openpyxl import Workbook
+from frappe import throw
 
-# # Load environment variables
-load_dotenv()  # Load all environment variables including GOOGLE_API_KEY
+# --------------------------------------------------------------------------- #
+# 1. Environment & Google Gemini configuration
+# --------------------------------------------------------------------------- #
 
-google_api_key = frappe.db.get_value("Google API Key", {'default': 1}, "key")
+load_dotenv()
+GOOGLE_API_KEY = frappe.db.get_value("Google API Key", {"default": 1}, "key")
+if not GOOGLE_API_KEY:
+    throw("Google Gemini API key not configured in DocType ‘Google API Key’. “key” field missing.")
 
-# Set up Google Gemini API key
-# genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-genai.configure(api_key=google_api_key)
+genai.configure(api_key=GOOGLE_API_KEY)
 
-# # # ------------------------------------------------------------------------------------------------------------------------------
-# # # ------------------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# 2. Gemini helper – ask the model for a solution
+# --------------------------------------------------------------------------- #
 
-# # # Generate the query based on user's input to run on the database------------------------------------------------------------------------------------------------------------------------------
-@frappe.whitelist()
-def generate_query(message, method=None):
-    # # Generate content using the Gemini model with the uploaded file
+def _ask_gemini(user_message: str) -> Dict[str, str]:
+    # Friendly handling for greetings
+    if user_message.strip().lower() in ["hi", "hello", "hey"]:
+        return {
+            "type": "explanation",
+            "code": "Hello! 👋 How can I help you with your ERPNext data?",
+            "note": "Friendly greeting."
+        }
+
     model = genai.GenerativeModel(
         model_name="gemini-1.5-flash",
         generation_config={
             "temperature": 0,
             "top_p": 0.95,
             "top_k": 40,
-            "max_output_tokens": 15000,  # Reduced token limit to avoid large responses
+            "max_output_tokens": 4096,
             "response_mime_type": "application/json",
         },
     )
-    # Define the prompt with the file
-    prompt = {
-        "role": "user",
-        "parts": [
-            # f"""Create an SQL query to be run in Frappe ERPNext based on the message provided. The query should save the results in a variable named query. Ensure the columns are appropriately named according to the data being retrieved. Analyze the provided message to determine if the query can be built within the capabilities of ERPNext. If it is possible to create the query, set the type as 'frappe'. If the message does not relate to ERPNext or is not processable, set the type as 'other' and generate a generic response for the prompt, saving it in the query variable. Message is ''{message}''"""
-            # f"""Create a SQL query based on below prompt to run in Frappe ERPnext ''{message}'' and save is in query variable. 
-            # And give appropriate names to columns of sql query. Analyze the prompt and based on that give the response. If it is possible to build query in ERPnext based on promt then set type as frppe otherwise set another"""
-            f"""
-            You are an expert Frappe/ERPNext developer. A user has asked the following question related to their ERPNext system:
 
-            "{message}"
+    prompt = f"""
+You are an expert Frappe/ERPNext developer with full access to the schema of an ERPNext v15 site (MariaDB).
+A user will ask a question about their system.
 
-            Your job is to:
-            1. Interpret the intent behind the question — even if it's vague or not phrased like a typical SQL prompt.
-            2. If the message can lead to a SQL query (e.g., data lookup, report, issue with entries), write the SQL and mark type as 'frappe'.
-            3. If it is not solvable via SQL (like UI bug, printing issue, or unclear), then respond helpfully in plain English and set type as 'other'.
+Your tasks:
+ 1. Decide whether the request can be solved with a **SQL query** (use value `frappe_query`) that runs directly on the `tab*` tables, or requires a **Python snippet** (use value `python`) via Frappe ORM / API.  Anything else is `explanation`.
 
-            Respond only with a valid JSON object in the format:
+ 2. If SQL is appropriate, write **one** valid MariaDB query that:
+      • encloses table names and columns in back‑ticks (`),
+      • uses clear `AS` aliases,
+      • never references non‑existent tables.
 
-            {{
-              "type": "frappe" or "other",
-              "query": "The SQL query if applicable, or helpful message if not."
-            }}
+ 3. For Python solutions, return *only* the body of a function (no imports) that solves the request using the Frappe API.
 
-            Do not say 'too vague'. Try to assume user intent when possible.
-            """
-        ]
+ 4. Respond with **pure JSON** in exactly the following structure:
+{{
+  "type": "frappe_query" | "python" | "explanation",
+  "code": "…SQL/Python/Plain‑text…",
+  "note": "…optional tip…"
+}}
+
+User request: "{user_message}"
+"""
+
+    response = model.generate_content(prompt)
+    raw = response.text
+
+    try:
+        parsed = json.loads(raw)
+        return parsed  # type: ignore[return-value]
+    except json.JSONDecodeError:
+        frappe.logger().warning("Gemini returned non‑JSON; fallback engaged.")
+        return {
+            "type": "explanation",
+            "code": "Hello! I couldn’t understand that, but I’m here to help with ERPNext queries!",
+            "note": "Gemini failed to format JSON."
+        }
+
+# --------------------------------------------------------------------------- #
+# 3. Execution helpers – run SQL or just relay code/explanation
+# --------------------------------------------------------------------------- #
+
+def _execute_frappe_query(sql: str) -> Union[List[Dict[str, Any]], Dict[str, str]]:
+    try:
+        return frappe.db.sql(sql, as_dict=True)
+    except Exception as exc:
+        frappe.logger().error(f"[AI‑Agent] SQL failed → {exc}")
+        return {
+            "error": "Query execution failed on server.",
+            "details": str(exc),
+            "suggestion": "Please review the generated SQL or refine your question.",
+        }
+
+# --------------------------------------------------------------------------- #
+# 4. Public controller – single source of truth for responses
+# --------------------------------------------------------------------------- #
+
+@frappe.whitelist()
+def get_solution(message: str) -> Dict[str, Any]:
+    gemini_resp = _ask_gemini(message)
+    resp_type = gemini_resp.get("type")
+    code = gemini_resp.get("code", "")
+    note = gemini_resp.get("note", "")
+
+    if resp_type == "frappe_query":
+        data = _execute_frappe_query(code)
+        return {
+            "type": resp_type,
+            "data": data,
+            "query": code,
+            "note": note,
+        }
+
+    return {
+        "type": resp_type,
+        "code": code,
+        "note": note,
     }
 
-    # # Generate the response
-    chat_session = model.start_chat(history=[prompt])
-    response = chat_session.send_message("Start processing")
-
-    # # Log the raw response text for debugging
-    response_text = response.text
-    frappe.logger().info(f"Raw response from Gemini: {response_text[:1000]}")  # Log first 1000 chars for inspection
-
-    # # Try to parse the JSON response
-    try:
-        data = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        frappe.throw(f"Failed to parse Gemini response: {str(e)}. Raw response: {response_text[:500]}")
-    
-    # # Check if the JSON is valid and complete
-    if 'query' not in data:
-        frappe.throw(f"Response from Gemini seems incomplete. Raw response: {response_text[:1000]}")
-    # Extract individual variables from JSON response
-    query = data.get("query", "N/A")
-    type = data.get("type", "N/A")
-
-    return query, type
-
-# # # Run query on database------------------------------------------------------------------------------------------------------------------------------
 @frappe.whitelist()
-def run_sql_query(query):
-    # Run the query on the database
-    output = frappe.db.sql(query, as_dict=True)
+def get_response(message: str):
+    return get_solution(message)
 
-    # Extract only the values from the output
-    if output and isinstance(output, list):
-        result = [list(row.values()) for row in output]
-        return result
+# --------------------------------------------------------------------------- #
+# 5. Excel helpers
+# --------------------------------------------------------------------------- #
 
-    # Return empty if no results found
-    return "No data found"
+def _records_to_excel(records: List[Dict[str, Any]]) -> str:
+    wb = Workbook()
+    ws = wb.active
 
-@frappe.whitelist()
-def to_donload_data(query):
-    # Run the query on the database
-    output = frappe.db.sql(query, as_dict=True)
-
-    # Return empty if no results found
-    return output
-
-
-# # # Generate Responce------------------------------------------------------------------------------------------------------------------------------
-@frappe.whitelist()
-def get_response(message):
-    # # Generate the query based on the user's prompt..
-    query, type = generate_query(message)
-    # frappe.msgprint(f"type: {type}")
-
-    if type == "frappe":
-        # # Generate the responce by running the query on database..
-        response = run_sql_query(query)
-    else:
-        response = query
-    return response 
-
-# # # # # Download Responce------------------------------------------------------------------------------------------------------------------------------
-# # Function to create the Excel file and return the file path
-def create_excel_file(data):
-    records = data
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "data"
-
-    # Extract headers from the first record (keys of the dictionary)
     if records:
-        headers = list(records[0].keys())
-        sheet.append(headers)  # Add headers to the first row
+        ws.append(list(records[0].keys()))
+        for row in records:
+            ws.append(list(row.values()))
 
-    # Adding data rows
-    for record in records:
-        row = list(record.values())  # Extract values from the dictionary
-        sheet.append(row)  # Append the row data
+    file_path = os.path.join(frappe.get_site_path("public", "files"), "erp_chatbot_output.xlsx")
+    wb.save(file_path)
+    return file_path
 
-    # Define the file path
-    file_path = "/tmp/erp_chatbot_output_.xlsx"
-    
-    # Save the workbook to the file path
-    workbook.save(file_path)
-    
-    return file_path  # Ensure it returns the file path as a string
+def _save_and_get_url(file_path: str) -> str:
+    filename = os.path.basename(file_path)
+    return get_url(f"/files/{filename}")
 
-# # Function to handle the download process
-def download_excel_file(data):
-    # Create the Excel file
-    file_path = create_excel_file(data)  # This should return the file path as a string
-    
-    # Open the file for reading
-    with open(file_path, "rb") as filedata:
-        file_name = "erp_chatbot_output_.xlsx"
-        content = filedata.read()
-
-    # Save the file in Frappe's file manager
-    file_object = save_file(file_name, content, "Page", "ai-agent-1", is_private=False)
-    
-    # Generate the URL to the file
-    file_url = get_url("/files/" + file_object.file_name)
-    
-    return file_url
-
-# # Function to download the response
 @frappe.whitelist()
-def download_response(user_input, bot_response):
-    # # Generate the query based on the user's prompt..
-    query, type = generate_query(user_input)
+def download_solution(message: str) -> Dict[str, Any]:
+    sol = get_solution(message)
+    if sol.get("type") != "frappe_query" or isinstance(sol.get("data"), dict):
+        return sol
 
-    # # Generate the responce by running the query on database..
-    data = to_donload_data(query)
+    file_path = _records_to_excel(sol["data"])
+    sol["file_url"] = _save_and_get_url(file_path)
+    return sol
 
-    # file_url = create_excel_file
-    url = download_excel_file(data)
+@frappe.whitelist()
+def download_response(user_input: str, bot_response: str) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(bot_response)
+        if isinstance(parsed, dict) and parsed.get("type") == "frappe_query":
+            records = parsed.get("data", [])
+            if not isinstance(records, list):
+                return {"error": "Expected list of records under 'data' for Excel export."}
+        elif isinstance(parsed, list):
+            records = parsed
+        else:
+            return {"error": "Invalid format. Could not locate tabular data for Excel export."}
 
-    return {"file_url": url}
+        file_path = _records_to_excel(records)
+        url = _save_and_get_url(file_path)
+        return {"file_url": url}
+    except Exception as e:
+        frappe.log_error(title="Download Response Error", message=str(e))
+        return {"error": "Could not generate file."}
